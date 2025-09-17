@@ -30,6 +30,7 @@ except ImportError:  # Local / EMR runtime
     getResolvedOptions = None  # type: ignore
     GLUE_RUNTIME = False
 
+from pyspark import StorageLevel  # type: ignore
 from pyspark.sql import DataFrame, Window  # type: ignore
 from pyspark.sql import functions as F  # type: ignore
 
@@ -266,8 +267,9 @@ class DeduplicationProcessor:
         df = self._populate_org_columns(df)
         df = self._assign_stacking_groups(df)
         df = self._compute_stacking_metrics(df)
+        df = df.persist(StorageLevel.MEMORY_AND_DISK)
 
-        stats_df = self._build_statistics(df)
+        stats_df = self._build_statistics(df, cached=True)
         return df, stats_df
 
     # ------------------------------------------------------------------
@@ -290,6 +292,18 @@ class DeduplicationProcessor:
             df = df.withColumn(self.stack_count_col, F.lit(None).cast("long"))
         if self.address_score_col not in df.columns:
             df = df.withColumn(self.address_score_col, F.lit(None).cast("double"))
+        if ROW_ID_COLUMN not in df.columns:
+            df = df.withColumn(
+                ROW_ID_COLUMN,
+                F.monotonically_increasing_id().cast("string"),
+            )
+        optional_string_columns = [
+            self.org_reject_group_col,
+            self.org_sample_type_col,
+        ]
+        for column in optional_string_columns:
+            if _is_specified(column) and column not in df.columns:
+                df = df.withColumn(column, F.lit(None).cast("string"))
         return df
 
     # ------------------------------------------------------------------
@@ -622,7 +636,12 @@ class DeduplicationProcessor:
     # Statistics
     # ------------------------------------------------------------------
 
-    def _build_statistics(self, df: DataFrame) -> DataFrame:
+    def _build_statistics(self, df: DataFrame, *, cached: bool = False) -> DataFrame:
+        should_unpersist = False
+        if not cached:
+            df = df.persist(StorageLevel.MEMORY_AND_DISK)
+            should_unpersist = True
+
         total_records = df.count()
         metrics: List[Tuple[str, int, float]] = []
 
@@ -658,7 +677,12 @@ class DeduplicationProcessor:
             count = df.filter(F.col(self.stack_type_col) == stack_value).count()
             metrics.append((label, count, percent(count)))
 
-        return self.spark.createDataFrame(metrics, ["metric", "value", "percentage"])
+        stats_df = self.spark.createDataFrame(metrics, ["metric", "value", "percentage"])
+
+        if should_unpersist:
+            df.unpersist()
+
+        return stats_df
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +759,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         stats_df.coalesce(1).write.mode("overwrite").option("header", True).csv(
             stats_path
         )
+
+        if processed_df.is_cached:
+            processed_df.unpersist()
     finally:
         if not GLUE_RUNTIME:
             spark.stop()
