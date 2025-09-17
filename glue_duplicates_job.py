@@ -297,6 +297,13 @@ class DeduplicationProcessor:
                 ROW_ID_COLUMN,
                 F.monotonically_increasing_id().cast("string"),
             )
+        optional_string_columns = [
+            self.org_reject_group_col,
+            self.org_sample_type_col,
+        ]
+        for column in optional_string_columns:
+            if _is_specified(column) and column not in df.columns:
+                df = df.withColumn(column, F.lit(None).cast("string"))
         return df
 
     # ------------------------------------------------------------------
