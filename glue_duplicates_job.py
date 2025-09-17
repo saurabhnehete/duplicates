@@ -292,6 +292,11 @@ class DeduplicationProcessor:
             df = df.withColumn(self.stack_count_col, F.lit(None).cast("long"))
         if self.address_score_col not in df.columns:
             df = df.withColumn(self.address_score_col, F.lit(None).cast("double"))
+        if ROW_ID_COLUMN not in df.columns:
+            df = df.withColumn(
+                ROW_ID_COLUMN,
+                F.monotonically_increasing_id().cast("string"),
+            )
         return df
 
     # ------------------------------------------------------------------
